@@ -58,7 +58,7 @@ AC_DEFUN([AC_CHECK_CC_FLAG],
 	my_cflags_save="$CFLAGS"
 	CFLAGS="$my_cflags_save $1"
 	AC_MSG_CHECKING([whether $CC accepts $1])
-	AC_COMPILE_IFELSE(AC_LANG_PROGRAM(),
+	AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[ ]], [[ ]])],
 			  [AC_MSG_RESULT([yes]); AC_SUBST([$2], ["$1"])],
 			  [AC_MSG_RESULT([no])]
 			 )
@@ -206,6 +206,8 @@ AS_IF([test "x$with_radosgw" != xno],
 		AC_MSG_FAILURE([--with-radosgw was given but libfcgi (libfcgi-dev on debian) not found])
 	     fi])])
 AM_CONDITIONAL(WITH_RADOSGW, test "$RADOSGW" = "1")
+
+AS_IF([test "$RADOSGW" = "1"], [AC_DEFINE([WITH_RADOSGW], [1], [define if radosgw enabled])])
 
 # fuse?
 AC_ARG_WITH([fuse],

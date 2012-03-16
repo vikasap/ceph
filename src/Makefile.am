@@ -336,8 +336,6 @@ my_libradosgw_src = \
 	rgw/rgw_xml.cc \
 	rgw/rgw_user.cc \
 	rgw/rgw_tools.cc \
-	rgw/rgw_access.cc \
-	rgw/rgw_fs.cc \
 	rgw/rgw_rados.cc \
 	rgw/rgw_op.cc \
 	rgw/rgw_common.cc \
@@ -712,6 +710,13 @@ test_store_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS} \
 	-I$(top_srcdir)/src/leveldb/include
 bin_DEBUGPROGRAMS += test_store
 
+xattr_bench_SOURCES = test/xattr_bench.cc
+xattr_bench_LDFLAGS = ${AM_LDFLAGS}
+xattr_bench_LDADD =  ${UNITTEST_STATIC_LDADD} libos.la leveldb/libleveldb.a $(LIBGLOBAL_LDA)
+xattr_bench_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS} \
+	-I$(top_srcdir)/src/leveldb/include
+bin_DEBUGPROGRAMS += xattr_bench
+
 test_filejournal_SOURCES = test/test_filejournal.cc
 test_filejournal_LDFLAGS = ${AM_LDFLAGS}
 test_filejournal_LDADD =  ${UNITTEST_STATIC_LDADD} libos.la $(LIBGLOBAL_LDA)
@@ -945,6 +950,7 @@ libcommon_files = \
 	mon/MonCaps.cc \
 	mon/MonClient.cc \
 	mon/MonMap.cc \
+	msg/Messenger.cc \
 	os/hobject.cc \
 	osd/OSDMap.cc \
 	osd/osd_types.cc \
@@ -1485,7 +1491,6 @@ noinst_HEADERS = \
         osdc/Objecter.h\
         perfglue/cpu_profiler.h\
         perfglue/heap_profiler.h\
-	rgw/rgw_access.h\
 	rgw/rgw_acl.h\
 	rgw/rgw_acl_s3.h\
 	rgw/rgw_acl_swift.h\
@@ -1494,7 +1499,6 @@ noinst_HEADERS = \
 	rgw/rgw_cls_api.h\
 	rgw/rgw_common.h\
 	rgw/rgw_formats.h\
-	rgw/rgw_fs.h\
 	rgw/rgw_log.h\
 	rgw/rgw_multi.h\
 	rgw/rgw_op.h\

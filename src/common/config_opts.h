@@ -144,6 +144,7 @@ OPTION(client_oc_target_dirty, OPT_INT, 1024*1024* 8) // target dirty (keep this
 // note: the max amount of "in flight" dirty data is roughly (max - target)
 OPTION(client_oc_max_sync_write, OPT_U64, 128*1024)   // sync writes >= this use wrlock
 OPTION(fuse_use_invalidate_cb, OPT_BOOL, false) // use fuse 2.8+ invalidate callback to keep page cache consistent
+OPTION(fuse_big_writes, OPT_BOOL, true)
 OPTION(objecter_tick_interval, OPT_DOUBLE, 5.0)
 OPTION(objecter_mon_retry_interval, OPT_DOUBLE, 5.0)
 OPTION(objecter_timeout, OPT_DOUBLE, 10.0)    // before we ask for a map
@@ -310,6 +311,13 @@ OPTION(osd_op_complaint_time, OPT_FLOAT, 30) // how many seconds old makes an op
 OPTION(osd_command_max_records, OPT_INT, 256)
 OPTION(filestore, OPT_BOOL, false)
 OPTION(filestore_debug_omap_check, OPT_BOOL, 0) // Expensive debugging check on sync
+// Use omap for xattrs for attrs over
+OPTION(filestore_xattr_use_omap, OPT_BOOL, false)
+// filestore_max_inline_xattr_size or
+OPTION(filestore_max_inline_xattr_size, OPT_U32, 512)
+// for more than filestore_max_inline_xattrs attrs
+OPTION(filestore_max_inline_xattrs, OPT_U32, 2)
+
 OPTION(filestore_max_sync_interval, OPT_DOUBLE, 5)    // seconds
 OPTION(filestore_min_sync_interval, OPT_DOUBLE, .01)  // seconds
 OPTION(filestore_dev, OPT_STR, "")

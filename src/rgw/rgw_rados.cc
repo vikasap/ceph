@@ -4,8 +4,8 @@
 
 #include "common/errno.h"
 
-#include "rgw_access.h"
 #include "rgw_rados.h"
+#include "rgw_cache.h"
 #include "rgw_acl.h"
 
 #include "rgw_cls_api.h"
@@ -31,6 +31,12 @@ using namespace librados;
 using namespace std;
 
 Rados *rados = NULL;
+
+static RGWCache<RGWRados> cached_rados_provider;
+static RGWRados rados_provider;
+
+RGWRados* RGWRados::store;
+
 
 static string notify_oid = "notify";
 static string shadow_ns = "shadow";
@@ -349,6 +355,84 @@ static void get_obj_bucket_and_oid_key(rgw_obj& obj, rgw_bucket& bucket, string&
   prepend_bucket_marker(bucket, obj.key, key);
 }
 
+
+#define DOUT_SUBSYS rgw
+
+void RGWObjManifestPart::generate_test_instances(std::list<RGWObjManifestPart*>& o)
+{
+  o.push_back(new RGWObjManifestPart);
+
+  RGWObjManifestPart *p = new RGWObjManifestPart;
+  rgw_bucket b("bucket", ".pool", "marker_", 12);
+  p->loc = rgw_obj(b, "object");
+  p->loc_ofs = 512 * 1024;
+  p->size = 128 * 1024;
+  o.push_back(p);
+}
+
+void RGWObjManifestPart::dump(Formatter *f) const
+{
+  f->open_object_section("loc");
+  loc.dump(f);
+  f->close_section();
+  f->dump_unsigned("loc_ofs", loc_ofs);
+  f->dump_unsigned("size", size);
+}
+
+void RGWObjManifest::generate_test_instances(std::list<RGWObjManifest*>& o)
+{
+  RGWObjManifest *m = new RGWObjManifest;
+  for (int i = 0; i<10; i++) {
+    RGWObjManifestPart p;
+    rgw_bucket b("bucket", ".pool", "marker_", 12);
+    p.loc = rgw_obj(b, "object");
+    p.loc_ofs = 0;
+    p.size = 512 * 1024;
+    m->objs[(uint64_t)i * 512 * 1024] = p;
+  }
+  m->obj_size = 5 * 1024 * 1024;
+
+  o.push_back(new RGWObjManifest);
+}
+
+void RGWObjManifest::dump(Formatter *f) const
+{
+  map<uint64_t, RGWObjManifestPart>::const_iterator iter = objs.begin();
+  f->open_array_section("objs");
+  for (; iter != objs.end(); ++iter) {
+    f->dump_unsigned("ofs", iter->first);
+    f->open_object_section("part");
+    iter->second.dump(f);
+    f->close_section();
+  }
+  f->close_section();
+  f->dump_unsigned("obj_size", obj_size);
+}
+
+RGWRados *RGWRados::init_storage_provider(CephContext *cct)
+{
+  int use_cache = cct->_conf->rgw_cache_enabled;
+  store = NULL;
+  if (!use_cache) {
+    store = &rados_provider;
+  } else {
+    store = &cached_rados_provider;
+  }
+
+  if (store->initialize(cct) < 0)
+    store = NULL;
+
+  return store;
+}
+
+void RGWRados::close_storage()
+{
+  if (!store)
+    return;
+
+  store->finalize();
+  store = NULL;
+}
 
 /** 
  * Initialize the RADOS instance and prepare to do other ops
@@ -1136,7 +1220,6 @@ int RGWRados::copy_obj(void *ctx,
                struct rgw_err *err)
 {
   int ret, r;
-  char *data;
   uint64_t total_len, obj_size;
   time_t lastmod;
   map<string, bufferlist>::iterator iter;
@@ -1164,11 +1247,12 @@ int RGWRados::copy_obj(void *ctx,
   RGWObjManifestPart *first_part;
 
   do {
-    ret = get_obj(ctx, &handle, src_obj, &data, ofs, end);
+    bufferlist bl;
+    ret = get_obj(ctx, &handle, src_obj, bl, ofs, end);
     if (ret < 0)
       return ret;
 
-    char *orig_data = data;
+    const char *data = bl.c_str();
 
     if (ofs < RGW_MAX_CHUNK_SIZE) {
       off_t len = min(RGW_MAX_CHUNK_SIZE - ofs, (off_t)ret);
@@ -1184,7 +1268,6 @@ int RGWRados::copy_obj(void *ctx,
     if (ret > 0) {
       r = put_obj_data(ctx, shadow_obj, data, ((ofs == 0) ? -1 : ofs), ret, false);
     }
-    free(orig_data);
     if (r < 0)
       goto done_err;
 
@@ -2138,14 +2221,13 @@ int RGWRados::clone_objs(void *ctx, rgw_obj& dst_obj,
 
 
 int RGWRados::get_obj(void *ctx, void **handle, rgw_obj& obj,
-            char **data, off_t ofs, off_t end)
+                      bufferlist& bl, off_t ofs, off_t end)
 {
   rgw_bucket bucket;
   std::string oid, key;
   rgw_obj read_obj = obj;
   uint64_t read_ofs = ofs;
   uint64_t len;
-  bufferlist bl;
   RGWRadosCtx *rctx = (RGWRadosCtx *)ctx;
   RGWRadosCtx *new_ctx = NULL;
   bool reading_from_head = true;
@@ -2220,19 +2302,14 @@ int RGWRados::get_obj(void *ctx, void **handle, rgw_obj& obj,
     ldout(cct, 0) << "NOTICE: RGWRados::get_obj: raced with another process, going to the shadow obj instead" << dendl;
     string loc = obj.loc();
     rgw_obj shadow(bucket, astate->shadow_obj, loc, shadow_ns);
-    r = get_obj(NULL, handle, shadow, data, ofs, end);
+    r = get_obj(NULL, handle, shadow, bl, ofs, end);
     goto done_ret;
   }
 
 done:
   if (bl.length() > 0) {
     r = bl.length();
-    *data = (char *)malloc(r);
-    memcpy(*data, bl.c_str(), bl.length());
-  } else {
-    *data = NULL;
   }
-
   if (r < 0 || !len || ((off_t)(ofs + len - 1) == end)) {
     delete state;
     *handle = NULL;

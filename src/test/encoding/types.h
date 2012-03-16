@@ -84,7 +84,9 @@ TYPE(MonCaps)
 TYPE(DBObjectMap::_Header)
 TYPE(DBObjectMap::State)
 
-#include "rgw/rgw_access.h"
+#ifdef WITH_RADOSGW
+
+#include "rgw/rgw_rados.h"
 TYPE(RGWObjManifestPart);
 TYPE(RGWObjManifest);
 
@@ -126,6 +128,8 @@ TYPE(rgw_obj)
 #include "rgw/rgw_log.h"
 TYPE(rgw_log_entry)
 TYPE(rgw_intent_log_entry)
+
+#endif
 
 // --- messages ---
 #include "messages/MAuth.h"
