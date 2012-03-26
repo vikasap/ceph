@@ -20,11 +20,6 @@
 #include "common/perf_counters.h"
 
 #include "acconfig.h"
-#ifdef FASTCGI_INCLUDE_DIR
-# include "fastcgi/fcgiapp.h"
-#else
-# include "fcgiapp.h"
-#endif
 
 #include <errno.h>
 #include <string.h>
@@ -422,27 +417,26 @@ struct rgw_bucket {
   std::string name;
   std::string pool;
   std::string marker;
-  uint64_t bucket_id;
+  std::string bucket_id;
 
-  rgw_bucket() { bucket_id = 0; }
+  rgw_bucket() { }
   rgw_bucket(const char *n) : name(n) {
     assert(*n == '.'); // only rgw private buckets should be initialized without pool
     pool = n;
     marker = "";
-    bucket_id = 0;
   }
-  rgw_bucket(const char *n, const char *p, const char *m, uint64_t id) :
+  rgw_bucket(const char *n, const char *p, const char *m, const char *id) :
     name(n), pool(p), marker(m), bucket_id(id) {}
 
   void clear() {
     name = "";
     pool = "";
     marker = "";
-    bucket_id = 0;
+    bucket_id = "";
   }
 
   void encode(bufferlist& bl) const {
-     ENCODE_START(3, 3, bl);
+     ENCODE_START(4, 3, bl);
     ::encode(name, bl);
     ::encode(pool, bl);
     ::encode(marker, bl);
@@ -450,12 +444,20 @@ struct rgw_bucket {
     ENCODE_FINISH(bl);
   }
   void decode(bufferlist::iterator& bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(4, 3, 3, bl);
     ::decode(name, bl);
     ::decode(pool, bl);
     if (struct_v >= 2) {
       ::decode(marker, bl);
-      ::decode(bucket_id, bl);
+      if (struct_v <= 3) {
+        uint64_t id;
+        ::decode(id, bl);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%llu", (long long)id);
+        bucket_id = buf;
+      } else {
+        ::decode(bucket_id, bl);
+      }
     }
     DECODE_FINISH(bl);
   }
@@ -517,6 +519,7 @@ struct RGWBucketStats
 struct req_state;
 
 struct RGWEnv;
+struct FCGX_Request;
 
 /** Store all the state necessary to complete and respond to an HTTP request*/
 struct req_state {

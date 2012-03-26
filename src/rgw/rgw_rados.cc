@@ -40,7 +40,6 @@ RGWRados* RGWRados::store;
 
 static string notify_oid = "notify";
 static string shadow_ns = "shadow";
-static string bucket_marker_ver_oid = ".rgw.bucket-marker-ver";
 static string dir_oid_prefix = ".dir.";
 static string default_storage_pool = ".rgw.buckets";
 static string avail_pools = ".pools.avail";
@@ -363,7 +362,7 @@ void RGWObjManifestPart::generate_test_instances(std::list<RGWObjManifestPart*>&
   o.push_back(new RGWObjManifestPart);
 
   RGWObjManifestPart *p = new RGWObjManifestPart;
-  rgw_bucket b("bucket", ".pool", "marker_", 12);
+  rgw_bucket b("bucket", ".pool", "marker_", "12");
   p->loc = rgw_obj(b, "object");
   p->loc_ofs = 512 * 1024;
   p->size = 128 * 1024;
@@ -384,7 +383,7 @@ void RGWObjManifest::generate_test_instances(std::list<RGWObjManifest*>& o)
   RGWObjManifest *m = new RGWObjManifest;
   for (int i = 0; i<10; i++) {
     RGWObjManifestPart p;
-    rgw_bucket b("bucket", ".pool", "marker_", 12);
+    rgw_bucket b("bucket", ".pool", "marker_", "12");
     p.loc = rgw_obj(b, "object");
     p.loc_ofs = 0;
     p.size = 512 * 1024;
@@ -820,16 +819,12 @@ int RGWRados::create_bucket(string& owner, rgw_bucket& bucket,
     if (r < 0)
       return r;
 
-    r = id_io_ctx.write(bucket_marker_ver_oid, bl, bl.length(), 0);
-    if (r < 0)
-      return r;
-
-    uint64_t ver = id_io_ctx.get_last_version();
-    ldout(cct, 20) << "got obj version=" << ver << dendl;
+    uint64_t iid = instance_id();
+    uint64_t bid = next_bucket_id();
     char buf[32];
-    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)ver);
+    snprintf(buf, sizeof(buf), "%llu.%llu", (long long)iid, (long long)bid); 
     bucket.marker = buf;
-    bucket.bucket_id = ver;
+    bucket.bucket_id = bucket.marker;
 
     string dir_oid =  dir_oid_prefix;
     dir_oid.append(bucket.marker);
@@ -860,12 +855,9 @@ int RGWRados::store_bucket_info(RGWBucketInfo& info, map<string, bufferlist> *pa
   if (ret < 0)
     return ret;
 
-  char bucket_char[16];
-  snprintf(bucket_char, sizeof(bucket_char), ".%lld", (long long unsigned)info.bucket.bucket_id);
-  string bucket_id_string(bucket_char);
-  ret = rgw_put_obj(info.owner, pi_buckets_rados, bucket_id_string, bl.c_str(), bl.length(), false, pattrs);
+  ret = rgw_put_obj(info.owner, pi_buckets_rados, info.bucket.bucket_id, bl.c_str(), bl.length(), false, pattrs);
   if (ret < 0) {
-    ldout(cct, 0) << "ERROR: failed to store " << pi_buckets_rados << ":" << bucket_id_string << " ret=" << ret << dendl;
+    ldout(cct, 0) << "ERROR: failed to store " << pi_buckets_rados << ":" << info.bucket.bucket_id << " ret=" << ret << dendl;
     return ret;
   }
 
@@ -876,12 +868,33 @@ int RGWRados::store_bucket_info(RGWBucketInfo& info, map<string, bufferlist> *pa
 
 int RGWRados::select_bucket_placement(string& bucket_name, rgw_bucket& bucket)
 {
-  bufferlist header;
+  bufferlist map_bl;
   map<string, bufferlist> m;
   string pool_name;
+  bool write_map = false;
 
   rgw_obj obj(pi_buckets_rados, avail_pools);
-  int ret = omap_get_all(obj, header, m);
+
+  int ret = rgw_get_obj(NULL, pi_buckets_rados, avail_pools, map_bl);
+  if (ret < 0) {
+    goto read_omap;
+  }
+
+  try {
+    bufferlist::iterator iter = map_bl.begin();
+    ::decode(m, iter);
+  } catch (buffer::error& err) {
+    ldout(cct, 0) << "ERROR: couldn't decode avail_pools" << dendl;
+  }
+
+read_omap:
+  if (!m.size()) {
+    bufferlist header;
+    ret = omap_get_all(obj, header, m);
+
+    write_map = true;
+  }
+
   if (ret < 0 || !m.size()) {
     vector<string> names;
     names.push_back(default_storage_pool);
@@ -896,24 +909,57 @@ int RGWRados::select_bucket_placement(string& bucket_name, rgw_bucket& bucket)
     m[default_storage_pool] = bl;
   }
 
-  vector<string> v;
-  map<string, bufferlist>::iterator miter;
-  for (miter = m.begin(); miter != m.end(); ++miter) {
-    v.push_back(miter->first);
+  if (write_map) {
+    bufferlist new_bl;
+    ::encode(m, new_bl);
+    ret = put_obj_data(NULL, obj, new_bl.c_str(), -1, new_bl.length(), false);
+    if (ret < 0) {
+      ldout(cct, 0) << "WARNING: could not save avail pools map info ret=" << ret << dendl;
+    }
   }
 
-  uint32_t r;
-  ret = get_random_bytes((char *)&r, sizeof(r));
-  if (ret < 0)
-    return ret;
+  map<string, bufferlist>::iterator miter;
+  if (m.size() > 1) {
+    vector<string> v;
+    for (miter = m.begin(); miter != m.end(); ++miter) {
+      v.push_back(miter->first);
+    }
 
-  int i = r % v.size();
-  pool_name = v[i];
+    uint32_t r;
+    ret = get_random_bytes((char *)&r, sizeof(r));
+    if (ret < 0)
+      return ret;
+
+    int i = r % v.size();
+    pool_name = v[i];
+  } else {
+    miter = m.begin();
+    pool_name = miter->first;
+  }
   bucket.pool = pool_name;
   bucket.name = bucket_name;
 
   return 0;
 
+}
+
+int RGWRados::update_placement_map()
+{
+  bufferlist header;
+  map<string, bufferlist> m;
+  rgw_obj obj(pi_buckets_rados, avail_pools);
+  int ret = omap_get_all(obj, header, m);
+  if (ret < 0)
+    return ret;
+
+  bufferlist new_bl;
+  ::encode(m, new_bl);
+  ret = put_obj_data(NULL, obj, new_bl.c_str(), -1, new_bl.length(), false);
+  if (ret < 0) {
+    ldout(cct, 0) << "WARNING: could not save avail pools map info ret=" << ret << dendl;
+  }
+
+  return ret;
 }
 
 int RGWRados::add_bucket_placement(std::string& new_pool)
@@ -925,6 +971,10 @@ int RGWRados::add_bucket_placement(std::string& new_pool)
   rgw_obj obj(pi_buckets_rados, avail_pools);
   bufferlist empty_bl;
   ret = omap_set(obj, new_pool, empty_bl);
+
+  // don't care about return value
+  update_placement_map();
+
   return ret;
 }
 
@@ -932,6 +982,10 @@ int RGWRados::remove_bucket_placement(std::string& old_pool)
 {
   rgw_obj obj(pi_buckets_rados, avail_pools);
   int ret = omap_del(obj, old_pool);
+
+  // don't care about return value
+  update_placement_map();
+
   return ret;
 }
 
@@ -3080,4 +3134,15 @@ int RGWRados::process_intent_log(rgw_bucket& bucket, string& oid,
   }
 
   return ret;
+}
+
+uint64_t RGWRados::instance_id()
+{
+  return rados->get_instance_id();
+}
+
+uint64_t RGWRados::next_bucket_id()
+{
+  Mutex::Locker l(bucket_id_lock);
+  return ++max_bucket_id;
 }

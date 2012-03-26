@@ -23,6 +23,7 @@
 #include <sys/uio.h>
 #include <limits.h>
 #include <sys/user.h>
+#include <poll.h>
 
 #include "common/config.h"
 #include "global/global_init.h"
@@ -48,8 +49,6 @@ static ostream& _prefix(std::ostream *_dout, SimpleMessenger *msgr) {
   return *_dout << "-- " << msgr->ms_addr << " ";
 }
 
-
-#include "tcp.cc"
 
 /********************************************
  * Accepter
@@ -2470,6 +2469,7 @@ bool SimpleMessenger::verify_authorizer(Connection *con, int peer_type,
 
 void SimpleMessenger::submit_message(Message *m, Pipe *pipe)
 { 
+  assert(pipe->msgr == this);
   lock.Lock();
   if (pipe == dispatch_queue.local_pipe) {
     ldout(cct,20) << "submit_message " << *m << " local" << dendl;
@@ -2630,6 +2630,7 @@ int SimpleMessenger::send_keepalive(Connection *con)
   SimpleMessenger::Pipe *pipe = (SimpleMessenger::Pipe *)con->get_pipe();
   if (pipe) {
     ldout(cct,20) << "send_keepalive con " << con << ", have pipe." << dendl;
+    assert(pipe->msgr == this);
     pipe->pipe_lock.Lock();
     pipe->_send_keepalive();
     pipe->pipe_lock.Unlock();
@@ -2751,6 +2752,7 @@ void SimpleMessenger::mark_down(Connection *con)
   Pipe *p = (Pipe *)con->get_pipe();
   if (p) {
     ldout(cct,1) << "mark_down " << con << " -- " << p << dendl;
+    assert(p->msgr == this);
     p->unregister_pipe();
     p->pipe_lock.Lock();
     p->stop();
@@ -2767,6 +2769,7 @@ void SimpleMessenger::mark_down_on_empty(Connection *con)
   lock.Lock();
   Pipe *p = (Pipe *)con->get_pipe();
   if (p) {
+    assert(p->msgr == this);
     p->pipe_lock.Lock();
     p->unregister_pipe();
     if (p->out_q.empty()) {
@@ -2790,6 +2793,7 @@ void SimpleMessenger::mark_disposable(Connection *con)
   Pipe *p = (Pipe *)con->get_pipe();
   if (p) {
     ldout(cct,1) << "mark_disposable " << con << " -- " << p << dendl;
+    assert(p->msgr == this);
     p->pipe_lock.Lock();
     p->policy.lossy = true;
     p->disposable = true;
