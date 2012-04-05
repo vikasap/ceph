@@ -620,7 +620,7 @@ void ReplicatedPG::do_op(OpRequestRef op)
   }
 
   // degraded object?
-  if (m->may_write() && is_degraded_object(head)) {
+  if (is_degraded_object(head)) {
     wait_for_degraded_object(head, op);
     return;
   }
