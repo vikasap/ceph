@@ -25,6 +25,7 @@ extern struct ceph_file_layout g_default_file_layout;
 #include "common/ConfUtils.h"
 #include "common/entity_name.h"
 #include "common/Mutex.h"
+#include "log/SubsystemMap.h"
 #include "include/assert.h" // TODO: remove
 #include "common/config_obs.h"
 #include "msg/msg_types.h"
@@ -108,12 +109,12 @@ public:
   int parse_argv(std::vector<const char*>& args);
 
   // Expand all metavariables. Make any pending observer callbacks.
-  void apply_changes(std::ostringstream *oss);
-  void _apply_changes(std::ostringstream *oss);
+  void apply_changes(std::ostream *oss);
+  void _apply_changes(std::ostream *oss);
   void call_all_observers();
 
   // Called by the Ceph daemons to make configuration changes at runtime
-  int injectargs(const std::string &s, std::ostringstream *oss);
+  int injectargs(const std::string &s, std::ostream *oss);
 
   // Set a configuration value, or crash
   // Metavariables will be expanded.
@@ -139,18 +140,28 @@ public:
   int get_val_from_conf_file(const std::vector <std::string> &sections,
 		   const char *key, std::string &out, bool emeta) const;
 
+  void show_config(std::ostream& out);
+
 private:
+  int parse_option(std::vector<const char*>& args,
+		   std::vector<const char*>::iterator& i,
+		   std::ostream *oss);
   int parse_injectargs(std::vector<const char*>& args,
-		      std::ostringstream *oss);
+		      std::ostream *oss);
   int parse_config_files_impl(const std::list<std::string> &conf_files,
 		   std::deque<std::string> *parse_errors);
 
   int set_val_impl(const char *val, const config_option *opt);
   int set_val_raw(const char *val, const config_option *opt);
 
+  void init_subsys();
+
   // Expand metavariables in the provided string.
   // Returns true if any metavariables were found and expanded.
   bool expand_meta(std::string &val) const;
+
+  /// expand all metavariables in config structure.
+  void expand_all_meta();
 
   // The configuration file we read, or NULL if we haven't read one.
   ConfFile cf;
@@ -159,7 +170,13 @@ private:
   changed_set_t changed;
 
 public:
+  ceph::log::SubsystemMap subsys;
+
   EntityName name;
+
+  /// cluster name
+  string cluster;
+
 #define OPTION_OPT_INT(name) const int name;
 #define OPTION_OPT_LONGLONG(name) const long long name;
 #define OPTION_OPT_STR(name) const std::string name;
@@ -169,7 +186,10 @@ public:
 #define OPTION_OPT_ADDR(name) const entity_addr_t name;
 #define OPTION_OPT_U32(name) const uint32_t name;
 #define OPTION_OPT_U64(name) const uint64_t name;
+#define OPTION_OPT_UUID(name) const uuid_d name;
 #define OPTION(name, ty, init) OPTION_##ty(name)
+#define SUBSYS(name, log, gather)
+#define DEFAULT_SUBSYS(log, gather)
 #include "common/config_opts.h"
 #undef OPTION_OPT_INT
 #undef OPTION_OPT_LONGLONG
@@ -180,7 +200,10 @@ public:
 #undef OPTION_OPT_ADDR
 #undef OPTION_OPT_U32
 #undef OPTION_OPT_U64
+#undef OPTION_OPT_UUID
 #undef OPTION
+#undef SUBSYS
+#undef DEFAULT_SUBSYS
 
   /** A lock that protects the md_config_t internals. It is
    * recursive, for simplicity.
@@ -191,7 +214,7 @@ public:
 
 typedef enum {
 	OPT_INT, OPT_LONGLONG, OPT_STR, OPT_DOUBLE, OPT_FLOAT, OPT_BOOL,
-	OPT_ADDR, OPT_U32, OPT_U64
+	OPT_ADDR, OPT_U32, OPT_U64, OPT_UUID
 } opt_type_t;
 
 bool ceph_resolve_file_search(const std::string& filename_list,
@@ -207,6 +230,19 @@ struct config_option {
   void *conf_ptr(md_config_t *conf) const;
 
   const void *conf_ptr(const md_config_t *conf) const;
+};
+
+enum config_subsys_id {
+  ceph_subsys_,   // default
+#define OPTION(a,b,c)
+#define SUBSYS(name, log, gather) \
+  ceph_subsys_##name,
+#define DEFAULT_SUBSYS(log, gather)
+#include "common/config_opts.h"
+#undef SUBSYS
+#undef OPTION
+#undef DEFAULT_SUBSYS
+  ceph_subsys_max
 };
 
 #endif

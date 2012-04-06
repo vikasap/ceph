@@ -41,6 +41,8 @@ using namespace std;
 #include "global/global_init.h"
 #include "global/signal_handler.h"
 
+#define dout_subsys ceph_subsys_mon
+
 extern CompatSet get_ceph_mon_feature_compat_set();
 
 Monitor *mon = NULL;
@@ -88,11 +90,6 @@ int main(int argc, const char **argv)
       osdmapfn = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--inject_monmap", (char*)NULL)) {
       inject_monmap = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--fsid", (char*)NULL)) {
-      if (!fsid.parse(val.c_str())) {
-	cerr << "unable to parse fsid '" << val << "'" << std::endl;
-	exit(1);
-      }
     } else {
       ++i;
     }
@@ -177,9 +174,9 @@ int main(int argc, const char **argv)
       }
     }
 
-    if (!fsid.is_zero()) {
-      cout << argv[0] << ": setting fsid to " << fsid << std::endl;
-      monmap.fsid = fsid;
+    if (!g_conf->fsid.is_zero()) {
+      monmap.fsid = g_conf->fsid;
+      cout << argv[0] << ": set fsid to " << g_conf->fsid << std::endl;
     }
     
     if (monmap.fsid.is_zero()) {

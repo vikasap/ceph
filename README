@@ -1,67 +1,19 @@
-============================================
 Ceph - a scalable distributed storage system
-============================================
+-----------------------------------------
 
 Please see http://ceph.newdream.net/ for current info.
 
-Prerequisites
-=============
+----
 
-Documentation Prerequisites
----------------------------
-To build the documentation, you must install the following: 
+To prepare the source tree for the first time in case it has been git cloned,
 
-- python-dev 
-- python-pip 
-- python-virualenv 
-- doxygen 
-- ditaa
-- libxml2-dev 
-- libxslt-dev 
-- dot 
-- graphviz
+$ git submodule update --init
 
-For example: 
+To build the server daemons, and FUSE client,
 
-	sudo apt-get install python-dev python-pip python-virualenv doxygen ditaa libxml2-dev libxslt-dev dot graphviz
-
-Building the Documentation
---------------------------
-To build the documentation, ensure that you are in the top-level `/ceph directory, and execute the build script. For example:
-
-	$ admin/build-doc
-
-
-Build Prerequisites
--------------------
-To build the source code, you must install the following: 
-
-- automake 
-- autoconf 
-- automake 
-- gcc 
-- g++ 
-- libboost-dev 
-- libedit-dev 
-- libssl-dev 
-- libtool 
-- libfcgi 
-- libfcgi-dev 
-- libfuse-dev 
-- linux-kernel-headers 
-- libcrypto++-dev
-
-For example: 
-
-	$ apt-get install automake autoconf automake gcc g++ libboost-dev libedit-dev libssl-dev libtool libfcgi libfcgi-dev libfuse-dev linux-kernel-headers libcrypto++-dev
-
-Build the Source
-----------------
-To build the server daemons, and FUSE client, execute the following:
-
-	$ ./autogen.sh
-	$ ./configure
-	$ make
+$ ./autogen.sh
+$ ./configure
+$ make
 
 (Note that the FUSE client will only be built if libfuse is present.)
 

@@ -2,6 +2,10 @@
 #include "ObjectStore.h"
 #include "common/Formatter.h"
 
+ostream& operator<<(ostream& out, const ObjectStore::Sequencer& s)
+{
+  return out << "osr(" << s.get_name() << " " << &s << ")";
+}
 
 void ObjectStore::Transaction::dump(ceph::Formatter *f)
 {
@@ -244,6 +248,20 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
 	f->close_section();
        }
       break;
+
+    case Transaction::OP_COLL_MOVE:
+       {
+	coll_t ocid = i.get_cid();
+	coll_t ncid = i.get_cid();
+	hobject_t oid = i.get_oid();
+	f->open_object_section("collection_move");
+	f->dump_stream("src_collection") << ocid;
+	f->dump_stream("dst_collection") << ncid;
+	f->dump_stream("oid") << oid;
+	f->close_section();
+       }
+      break;
+
 
     case Transaction::OP_COLL_SETATTR:
       {
@@ -521,6 +539,15 @@ void ObjectStore::Transaction::dump(ostream& out)
        }
       break;
 
+    case Transaction::OP_COLL_MOVE:
+       {
+	coll_t ocid = i.get_cid();
+	coll_t ncid = i.get_cid();
+	hobject_t oid = i.get_oid();
+	out << op_num << ": coll_move " << ocid << " " << ncid << " " << oid << "\n";
+       }
+      break;
+
     case Transaction::OP_COLL_SETATTR:
       {
 	coll_t cid = i.get_cid();
@@ -606,6 +633,7 @@ void ObjectStore::Transaction::generate_test_instances(list<ObjectStore::Transac
   coll_t c2("foocoll2");
   hobject_t o1("obj", "", 123, 456);
   hobject_t o2("obj2", "", 123, 456);
+  hobject_t o3("obj3", "", 123, 456);
   t->touch(c, o1);
   bufferlist bl;
   bl.append("some data");
@@ -625,11 +653,13 @@ void ObjectStore::Transaction::generate_test_instances(list<ObjectStore::Transac
   t->rmattrs(c, o1);
 
   t->clone(c, o1, o2);
+  t->clone(c, o1, o3);
   t->clone_range(c, o1, o2, 1, 12, 99);
 
   t->create_collection(c);
   t->collection_add(c, c2, o1);
   t->collection_add(c, c2, o2);
+  t->collection_move(c, c2, o3);
   t->remove_collection(c);
   t->collection_setattr(c, "this", bl);
   t->collection_rmattr(c, "foo");

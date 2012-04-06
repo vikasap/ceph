@@ -25,6 +25,8 @@
 #include "msg/msg_types.h"
 #include "osd/osd_types.h"
 
+#include "include/assert.h"
+
 #include <errno.h>
 #include <sstream>
 #include <stdlib.h>
@@ -51,7 +53,7 @@ using std::pair;
 using std::set;
 using std::string;
 
-const char *CEPH_CONF_FILE_DEFAULT = "/etc/ceph/ceph.conf, ~/.ceph/config, ceph.conf";
+const char *CEPH_CONF_FILE_DEFAULT = "/etc/ceph/$cluster.conf, ~/.ceph/$cluster.conf, $cluster.conf";
 
 // file layouts
 struct ceph_file_layout g_default_file_layout = {
@@ -83,8 +85,12 @@ const void *config_option::conf_ptr(const md_config_t *conf) const
 struct config_option config_optionsp[] = {
 #define OPTION(name, type, def_val) \
        { STRINGIFY(name), type, offsetof(struct md_config_t, name) },
+#define SUBSYS(name, log, gather)
+#define DEFAULT_SUBSYS(log, gather)
 #include "common/config_opts.h"
 #undef OPTION
+#undef SUBSYS
+#undef DEFAULT_SUBSYS
 };
 
 const int NUM_CONFIG_OPTIONS = sizeof(config_optionsp) / sizeof(config_option);
@@ -110,12 +116,31 @@ bool ceph_resolve_file_search(const std::string& filename_list,
 }
 
 md_config_t::md_config_t()
-  : 
+  : cluster("ceph"),
+
 #define OPTION(name, type, def_val) name(def_val),
+#define SUBSYS(name, log, gather)
+#define DEFAULT_SUBSYS(log, gather)
 #include "common/config_opts.h"
 #undef OPTION
+#undef SUBSYS
+#undef DEFAULT_SUBSYS
   lock("md_config_t", true)
 {
+  init_subsys();
+}
+
+void md_config_t::init_subsys()
+{
+#define SUBSYS(name, log, gather) \
+  subsys.add(ceph_subsys_##name, STRINGIFY(name), log, gather);
+#define DEFAULT_SUBSYS(log, gather) \
+  subsys.add(ceph_subsys_, "none", log, gather);
+#define OPTION(a, b, c)
+#include "common/config_opts.h"
+#undef OPTION
+#undef SUBSYS
+#undef DEFAULT_SUBSYS
 }
 
 md_config_t::~md_config_t()
@@ -178,7 +203,9 @@ int md_config_t::parse_config_files_impl(const std::list<std::string> &conf_file
   list<string>::const_iterator c;
   for (c = conf_files.begin(); c != conf_files.end(); ++c) {
     cf.clear();
-    int ret = cf.parse_file(c->c_str(), parse_errors);
+    string fn = *c;
+    expand_meta(fn);
+    int ret = cf.parse_file(fn.c_str(), parse_errors);
     if (ret == 0)
       break;
     else if (ret != -ENOENT)
@@ -196,6 +223,25 @@ int md_config_t::parse_config_files_impl(const std::list<std::string> &conf_file
     if (ret == 0) {
       set_val_impl(val.c_str(), opt);
     }
+  }
+  
+  // subsystems?
+  for (int o = 0; o < subsys.get_num(); o++) {
+    std::string as_option("debug_");
+    as_option += subsys.get_name(o);
+    std::string val;
+    int ret = get_val_from_conf_file(my_sections, as_option.c_str(), val, false);
+    if (ret == 0) {
+      int log, gather;
+      int r = sscanf(val.c_str(), "%d/%d", &log, &gather);
+      if (r >= 1) {
+	if (r < 2)
+	  gather = log;
+	//	cout << "config subsys " << subsys.get_name(o) << " log " << log << " gather " << gather << std::endl;
+	subsys.set_log_level(o, log);
+	subsys.set_gather_level(o, gather);
+      }
+    }	
   }
 
   // Warn about section names that look like old-style section names
@@ -233,6 +279,18 @@ void md_config_t::parse_env()
   }
 }
 
+void md_config_t::show_config(std::ostream& out)
+{
+  out << "name = " << name << std::endl;
+  out << "cluster = " << cluster << std::endl;
+  for (int i = 0; i < NUM_CONFIG_OPTIONS; i++) {
+    config_option *opt = config_optionsp + i;
+    char *buf;
+    _get_val(opt->name, &buf, -1);
+    out << opt->name << " = " << buf << std::endl;
+  }
+}
+
 int md_config_t::parse_argv(std::vector<const char*>& args)
 {
   Mutex::Locker l(lock);
@@ -255,6 +313,26 @@ int md_config_t::parse_argv(std::vector<const char*>& args)
       cerr << cf << std::endl;
       _exit(0);
     }
+    else if (ceph_argparse_flag(args, i, "--show_config", (char*)NULL)) {
+      expand_all_meta();
+      show_config(cout);
+      _exit(0);
+    }
+    else if (ceph_argparse_witharg(args, i, &val, "--show_config_value", (char*)NULL)) {
+      char *buf = 0;
+      int r = _get_val(val.c_str(), &buf, -1);
+      if (r < 0) {
+	if (r == -ENOENT)
+	  std::cerr << "failed to get config option '" << val << "': option not found" << std::endl;
+	else
+	  std::cerr << "failed to get config option '" << val << "': " << strerror(-r) << std::endl;
+	_exit(1);
+      }
+      string s = buf;
+      expand_meta(s);
+      std::cout << s << std::endl;
+      _exit(0);
+    }
     else if (ceph_argparse_flag(args, i, "--foreground", "-f", (char*)NULL)) {
       set_val_or_die("daemonize", "false");
       set_val_or_die("pid_file", "");
@@ -263,12 +341,9 @@ int md_config_t::parse_argv(std::vector<const char*>& args)
       set_val_or_die("daemonize", "false");
       set_val_or_die("log_file", "");
       set_val_or_die("pid_file", "");
-      set_val_or_die("log_sym_dir", "");
-      set_val_or_die("log_sym_history", "0");
       set_val_or_die("log_to_stderr", "true");
       set_val_or_die("err_to_stderr", "true");
       set_val_or_die("log_to_syslog", "false");
-      set_val_or_die("log_per_instance", "false");
     }
     // Some stuff that we wanted to give universal single-character options for
     // Careful: you can burn through the alphabet pretty quickly by adding
@@ -292,110 +367,126 @@ int md_config_t::parse_argv(std::vector<const char*>& args)
       set_val_or_die("client_mountpoint", val.c_str());
     }
     else {
-      int o;
-      for (o = 0; o < NUM_CONFIG_OPTIONS; ++o) {
-	const config_option *opt = config_optionsp + o;
-	std::string as_option("--");
-	as_option += opt->name;
-
-	if (opt->type == OPT_BOOL) {
-	  if (ceph_argparse_flag(args, i, as_option.c_str(), (char*)NULL)) {
-	    set_val_impl("true", opt);
-	    break;
-	  }
-	  std::string no_option("--no-");
-	  no_option += opt->name;
-	  if (ceph_argparse_flag(args, i, no_option.c_str(), (char*)NULL)) {
-	    set_val_impl("false", opt);
-	    break;
-	  }
-	}
-	else if (ceph_argparse_witharg(args, i, &val,
-				       as_option.c_str(), (char*)NULL)) {
-	  set_val_impl(val.c_str(), opt);
-	  break;
-	}
-      }
-      if (o == NUM_CONFIG_OPTIONS) {
-	// ignore
-	++i;
-      }
+      parse_option(args, i, NULL);
     }
   }
   return 0;
 }
 
+int md_config_t::parse_option(std::vector<const char*>& args,
+			       std::vector<const char*>::iterator& i,
+			       ostream *oss)
+{
+  int ret = 0;
+  int o;
+  std::string val;
+
+  // subsystems?
+  for (o = 0; o < subsys.get_num(); o++) {
+    std::string as_option("--");
+    as_option += "debug_";
+    as_option += subsys.get_name(o);
+    if (ceph_argparse_witharg(args, i, &val,
+			      as_option.c_str(), (char*)NULL)) {
+      int log, gather;
+      int r = sscanf(val.c_str(), "%d/%d", &log, &gather);
+      if (r >= 1) {
+	if (r < 2)
+	  gather = log;
+	//	  cout << "subsys " << subsys.get_name(o) << " log " << log << " gather " << gather << std::endl;
+	subsys.set_log_level(o, log);
+	subsys.set_gather_level(o, gather);
+      }
+      break;
+    }	
+  }
+  if (o < subsys.get_num()) {
+    return ret;
+  }
+
+  for (o = 0; o < NUM_CONFIG_OPTIONS; ++o) {
+    const config_option *opt = config_optionsp + o;
+    std::string as_option("--");
+    as_option += opt->name;
+    if (opt->type == OPT_BOOL) {
+      int res;
+      if (ceph_argparse_binary_flag(args, i, &res, oss, as_option.c_str(),
+				    (char*)NULL)) {
+	if (res == 0)
+	  set_val_impl("false", opt);
+	else if (res == 1)
+	  set_val_impl("true", opt);
+	else
+	  ret = res;
+	break;
+      } else {
+	std::string no("--no-");
+	no += opt->name;
+	if (ceph_argparse_flag(args, i, &res, no.c_str(), (char*)NULL)) {
+	  set_val_impl("false", opt);
+	  break;
+	}
+      }
+    }
+    else if (ceph_argparse_witharg(args, i, &val,
+				   as_option.c_str(), (char*)NULL)) {
+      if (oss && (
+		  ((opt->type == OPT_STR) || (opt->type == OPT_ADDR) ||
+		   (opt->type == OPT_UUID)) &&
+		  (observers.find(opt->name) == observers.end()))) {
+	*oss << "You cannot change " << opt->name << " using injectargs.\n";
+	ret = -ENOSYS;
+	break;
+      }
+      int res = set_val_impl(val.c_str(), opt);
+      if (res) {
+	if (oss) {
+	  *oss << "Parse error setting " << opt->name << " to '"
+	       << val << "' using injectargs.\n";
+	  ret = res;
+	  break;
+	} else {
+	  cerr << "parse error setting '" << opt->name << "' to '"
+	       << val << "'\n" << std::endl;
+	}
+      }
+      break;
+    }
+  }
+  if (o == NUM_CONFIG_OPTIONS) {
+    // ignore
+    ++i;
+  }
+  return ret;
+}
+
 int md_config_t::parse_injectargs(std::vector<const char*>& args,
-				  std::ostringstream *oss)
+				  std::ostream *oss)
 {
   assert(lock.is_locked());
   std::string val;
   int ret = 0;
   for (std::vector<const char*>::iterator i = args.begin(); i != args.end(); ) {
-    int o;
-    for (o = 0; o < NUM_CONFIG_OPTIONS; ++o) {
-      const config_option *opt = config_optionsp + o;
-      std::string as_option("--");
-      as_option += opt->name;
-      if (opt->type == OPT_BOOL) {
-	int res;
-	if (ceph_argparse_binary_flag(args, i, &res, oss, as_option.c_str(),
-				      (char*)NULL)) {
-	  if (res == 0)
-	    set_val_impl("false", opt);
-	  else if (res == 1)
-	    set_val_impl("true", opt);
-	  else
-	    ret = res;
-	  break;
-	}
-      }
-      else if (ceph_argparse_witharg(args, i, &val,
-				     as_option.c_str(), (char*)NULL)) {
-	if (((opt->type == OPT_STR) || (opt->type == OPT_ADDR)) &&
-	    (observers.find(opt->name) == observers.end())) {
-	  *oss << "You cannot change " << opt->name << " using injectargs.\n";
-	  ret = -ENOSYS;
-	  break;
-	}
-	int res = set_val_impl(val.c_str(), opt);
-	if (res) {
-	  *oss << "Parse error setting " << opt->name << " to '"
-	       << val << "' using injectargs.\n";
-	  ret = res;
-	  break;
-	}
-	break;
-      }
-    }
-    if (o == NUM_CONFIG_OPTIONS) {
-      // ignore
-      ++i;
-    }
+    int r = parse_option(args, i, oss);
+    if (r < 0)
+      ret = r;
   }
   return ret;
 }
 
-void md_config_t::apply_changes(std::ostringstream *oss)
+void md_config_t::apply_changes(std::ostream *oss)
 {
   Mutex::Locker l(lock);
   _apply_changes(oss);
 }
 
-void md_config_t::_apply_changes(std::ostringstream *oss)
+void md_config_t::_apply_changes(std::ostream *oss)
 {
   /* Maps observers to the configuration options that they care about which
    * have changed. */
   typedef std::map < md_config_obs_t*, std::set <std::string> > rev_obs_map_t;
 
-  // Expand all metavariables
-  for (int i = 0; i < NUM_CONFIG_OPTIONS; i++) {
-    config_option *opt = config_optionsp + i;
-    if (opt->type == OPT_STR) {
-      std::string *str = (std::string *)opt->conf_ptr(this);
-      expand_meta(*str);
-    }
-  }
+  expand_all_meta();
 
   // create the reverse observer mapping, mapping observers to the set of
   // changed keys that they'll get.
@@ -433,14 +524,7 @@ void md_config_t::call_all_observers()
 {
   Mutex::Locker l(lock);
 
-  // Expand all metavariables
-  for (int i = 0; i < NUM_CONFIG_OPTIONS; i++) {
-    config_option *opt = config_optionsp + i;
-    if (opt->type == OPT_STR) {
-      std::string *str = (std::string *)opt->conf_ptr(this);
-      expand_meta(*str);
-    }
-  }
+  expand_all_meta();
 
   std::map<md_config_obs_t*,std::set<std::string> > obs;
   for (obs_map_t::iterator r = observers.begin(); r != observers.end(); ++r)
@@ -451,7 +535,7 @@ void md_config_t::call_all_observers()
     p->first->handle_conf_change(this, p->second);
 }
 
-int md_config_t::injectargs(const std::string& s, std::ostringstream *oss)
+int md_config_t::injectargs(const std::string& s, std::ostream *oss)
 {
   int ret;
   Mutex::Locker l(lock);
@@ -469,7 +553,7 @@ int md_config_t::injectargs(const std::string& s, std::ostringstream *oss)
   }
   ret = parse_injectargs(nargs, oss);
   if (!nargs.empty()) {
-    *oss << "ERROR: failed to parse arguments: ";
+    *oss << " failed to parse arguments: ";
     std::string prefix;
     for (std::vector<const char*>::const_iterator i = nargs.begin();
 	 i != nargs.end(); ++i) {
@@ -507,7 +591,8 @@ int md_config_t::set_val(const char *key, const char *val)
     if (strcmp(opt->name, k.c_str()) == 0) {
       if (internal_safe_to_start_threads) {
 	// If threads have been started...
-	if ((opt->type == OPT_STR) || (opt->type == OPT_ADDR)) {
+	if ((opt->type == OPT_STR) || (opt->type == OPT_ADDR) ||
+	    (opt->type == OPT_UUID)) {
 	  // And this is NOT an integer valued variable....
 	  if (observers.find(opt->name) == observers.end()) {
 	    // And there is no observer to safely change it...
@@ -574,10 +659,12 @@ int md_config_t::_get_val(const char *key, char **buf, int len) const
       case OPT_U64:
         oss << *(uint64_t*)opt->conf_ptr(this);
         break;
-      case OPT_ADDR: {
+      case OPT_ADDR:
         oss << *(entity_addr_t*)opt->conf_ptr(this);
         break;
-      }
+      case OPT_UUID:
+	oss << *(uuid_d*)opt->conf_ptr(this);
+        break;
     }
     string str(oss.str());
     int l = strlen(str.c_str()) + 1;
@@ -713,14 +800,32 @@ int md_config_t::set_val_raw(const char *val, const config_option *opt)
       }
       return 0;
     }
+    case OPT_UUID: {
+      uuid_d *u = (uuid_d*)opt->conf_ptr(this);
+      if (!u->parse(val))
+	return -EINVAL;
+      return 0;
+    }
   }
   return -ENOSYS;
 }
 
 static const char *CONF_METAVARIABLES[] =
-      { "type", "name", "host", "num", "id" };
+  { "cluster", "type", "name", "host", "num", "id" };
 static const int NUM_CONF_METAVARIABLES =
       (sizeof(CONF_METAVARIABLES) / sizeof(CONF_METAVARIABLES[0]));
+
+void md_config_t::expand_all_meta()
+{
+  // Expand all metavariables
+  for (int i = 0; i < NUM_CONFIG_OPTIONS; i++) {
+    config_option *opt = config_optionsp + i;
+    if (opt->type == OPT_STR) {
+      std::string *str = (std::string *)opt->conf_ptr(this);
+      expand_meta(*str);
+    }
+  }
+}
 
 bool md_config_t::expand_meta(std::string &val) const
 {
@@ -744,6 +849,8 @@ bool md_config_t::expand_meta(std::string &val) const
 	continue;
       if (strcmp(CONF_METAVARIABLES[i], "type")==0)
 	out += name.get_type_name();
+      else if (strcmp(CONF_METAVARIABLES[i], "cluster")==0)
+	out += cluster;
       else if (strcmp(CONF_METAVARIABLES[i], "name")==0)
 	out += name.to_cstr();
       else if (strcmp(CONF_METAVARIABLES[i], "host")==0)

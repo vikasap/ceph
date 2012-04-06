@@ -20,6 +20,7 @@
 #include "include/buffer.h"
 #include "include/types.h"
 #include "osd/osd_types.h"
+#include "common/TrackedOp.h"
 #include "ObjectMap.h"
 
 #include <errno.h>
@@ -79,16 +80,32 @@ public:
 
   Logger *logger;
 
+  /**
+   * a sequencer orders transactions
+   *
+   * Any transactions queued under a given sequencer will be applied in
+   * sequence.  Transactions queued under different sequencers may run
+   * in parallel.
+   */
   struct Sequencer_impl {
     virtual void flush() = 0;
     virtual ~Sequencer_impl() {}
   };
   struct Sequencer {
+    string name;
     Sequencer_impl *p;
-    Sequencer() : p(NULL) {}
+
+    Sequencer(string n)
+      : name(n), p(NULL) {}
     ~Sequencer() {
       delete p;
     }
+
+    /// return a unique string identifier for this sequencer
+    const string& get_name() const {
+      return name;
+    }
+    /// wait for any queued transactions on this sequencer to apply
     void flush() {
       if (p)
 	p->flush();
@@ -579,15 +596,15 @@ public:
 
   virtual int queue_transaction(Sequencer *osr, Transaction* t) = 0;
   virtual int queue_transaction(Sequencer *osr, Transaction *t, Context *onreadable, Context *ondisk=0,
-				Context *onreadable_sync=0) {
+				Context *onreadable_sync=0,
+				TrackedOpRef op = TrackedOpRef()) {
     list<Transaction*> tls;
     tls.push_back(t);
-    return queue_transactions(osr, tls, onreadable, ondisk, onreadable_sync);
+    return queue_transactions(osr, tls, onreadable, ondisk, onreadable_sync, op);
   }
   virtual int queue_transactions(Sequencer *osr, list<Transaction*>& tls, Context *onreadable, Context *ondisk=0,
-				 Context *onreadable_sync=0) = 0;
-
-
+				 Context *onreadable_sync=0,
+				 TrackedOpRef op = TrackedOpRef()) = 0;
 
  public:
   ObjectStore() : logger(NULL) {}
@@ -733,5 +750,7 @@ public:
 
 
 WRITE_CLASS_ENCODER(ObjectStore::Transaction)
+
+ostream& operator<<(ostream& out, const ObjectStore::Sequencer& s);
 
 #endif

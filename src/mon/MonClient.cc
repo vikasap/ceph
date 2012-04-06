@@ -40,7 +40,7 @@
 #include "common/config.h"
 
 
-#define DOUT_SUBSYS monc
+#define dout_subsys ceph_subsys_monc
 #undef dout_prefix
 #define dout_prefix *_dout << "monclient" << (hunting ? "(hunting)":"") << ": "
 
@@ -97,10 +97,8 @@ int MonClient::build_initial_monmap(CephContext *cct, MonMap &monmap)
   }
 
   // fsid from conf?
-  if (cct->_conf->fsid.length()) {
-    if (!monmap.fsid.parse(cct->_conf->fsid.c_str())) {
-      cerr << " failed to parse fsid '" << cct->_conf->fsid << "'" << std::endl;
-    }
+  if (!cct->_conf->fsid.is_zero()) {
+    monmap.fsid = cct->_conf->fsid;
   }
 
   // -m foo?

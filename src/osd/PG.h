@@ -26,11 +26,13 @@
 #include "include/assert.h" 
 
 #include "include/types.h"
+#include "include/stringify.h"
 #include "osd_types.h"
 #include "include/buffer.h"
 #include "include/xlist.h"
 #include "include/atomic.h"
 
+#include "OpRequest.h"
 #include "OSDMap.h"
 #include "os/ObjectStore.h"
 #include "msg/Messenger.h"
@@ -52,7 +54,6 @@ using namespace __gnu_cxx;
 
 
 class OSD;
-class OpRequest;
 class MOSDOp;
 class MOSDSubOp;
 class MOSDSubOpReply;
@@ -394,7 +395,7 @@ public:
   }
 
 
-  list<OpRequest*> op_queue;  // op queue
+  list<OpRequestRef> op_queue;  // op queue
 
   bool dirty_info, dirty_log;
 
@@ -459,6 +460,7 @@ public:
   OndiskLog   ondisklog;
   pg_missing_t     missing;
   map<hobject_t, set<int> > missing_loc;
+  set<int> missing_loc_sources;           // superset of missing_loc locations
   
   interval_set<snapid_t> snap_collections;
   map<epoch_t,Interval> past_intervals;
@@ -648,14 +650,14 @@ protected:
 
 
   // pg waiters
-  list<OpRequest*>            waiting_for_active;
-  list<OpRequest*>            waiting_for_all_missing;
-  map<hobject_t, list<OpRequest*> > waiting_for_missing_object,
+  list<OpRequestRef>            waiting_for_active;
+  list<OpRequestRef>            waiting_for_all_missing;
+  map<hobject_t, list<OpRequestRef> > waiting_for_missing_object,
                                         waiting_for_degraded_object;
-  map<eversion_t,list<OpRequest*> > waiting_for_ondisk;
-  map<eversion_t,OpRequest*>   replay_queue;
+  map<eversion_t,list<OpRequestRef> > waiting_for_ondisk;
+  map<eversion_t,OpRequestRef>   replay_queue;
 
-  void requeue_object_waiters(map<hobject_t, list<OpRequest*> >& m);
+  void requeue_object_waiters(map<hobject_t, list<OpRequestRef> >& m);
 
   // stats
   Mutex pg_stats_lock;
@@ -767,7 +769,7 @@ public:
   void clear_recovery_state();
   virtual void _clear_recovery_state() = 0;
   void defer_recovery();
-  virtual void check_recovery_op_pulls(const OSDMapRef newmap) = 0;
+  virtual bool check_recovery_sources(const OSDMapRef newmap) = 0;
   void start_recovery_op(const hobject_t& soid);
   void finish_recovery_op(const hobject_t& soid, bool dequeue=false);
 
@@ -813,11 +815,11 @@ public:
   bool sched_scrub();
 
   void replica_scrub(class MOSDRepScrub *op);
-  void sub_op_scrub_map(OpRequest *op);
-  void sub_op_scrub_reserve(OpRequest *op);
-  void sub_op_scrub_reserve_reply(OpRequest *op);
-  void sub_op_scrub_unreserve(OpRequest *op);
-  void sub_op_scrub_stop(OpRequest *op);
+  void sub_op_scrub_map(OpRequestRef op);
+  void sub_op_scrub_reserve(OpRequestRef op);
+  void sub_op_scrub_reserve_reply(OpRequestRef op);
+  void sub_op_scrub_unreserve(OpRequestRef op);
+  void sub_op_scrub_stop(OpRequestRef op);
 
 
   // -- recovery state --
@@ -1285,6 +1287,7 @@ public:
     backfill_target(-1),
     pg_stats_lock("PG::pg_stats_lock"),
     pg_stats_valid(false),
+    osr(stringify(p)),
     finish_sync_event(NULL),
     finalizing_scrub(false),
     scrub_reserved(false), scrub_reserve_failed(false),
@@ -1423,13 +1426,13 @@ public:
 
 
   // abstract bits
-  void do_request(OpRequest *op);
+  void do_request(OpRequestRef op);
 
-  virtual void do_op(OpRequest *op) = 0;
-  virtual void do_sub_op(OpRequest *op) = 0;
-  virtual void do_sub_op_reply(OpRequest *op) = 0;
-  virtual void do_scan(OpRequest *op) = 0;
-  virtual void do_backfill(OpRequest *op) = 0;
+  virtual void do_op(OpRequestRef op) = 0;
+  virtual void do_sub_op(OpRequestRef op) = 0;
+  virtual void do_sub_op_reply(OpRequestRef op) = 0;
+  virtual void do_scan(OpRequestRef op) = 0;
+  virtual void do_backfill(OpRequestRef op) = 0;
   virtual bool snap_trimmer() = 0;
 
   virtual int do_command(vector<string>& cmd, ostream& ss,

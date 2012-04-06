@@ -31,7 +31,7 @@
 
 #include <sstream>
 
-#define DOUT_SUBSYS osd
+#define dout_subsys ceph_subsys_osd
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, this)
 static ostream& _prefix(std::ostream *_dout, const PG *pg) {
@@ -549,16 +549,18 @@ bool PG::search_for_missing(const pg_info_t &oinfo, const pg_missing_t *omissing
 
     map<hobject_t, set<int> >::iterator ml = missing_loc.find(soid);
     if (ml == missing_loc.end()) {
-      map<hobject_t, list<class OpRequest*> >::iterator wmo =
+      map<hobject_t, list<OpRequestRef> >::iterator wmo =
 	waiting_for_missing_object.find(soid);
       if (wmo != waiting_for_missing_object.end()) {
 	osd->requeue_ops(this, wmo->second);
       }
       stats_updated = true;
       missing_loc[soid].insert(fromosd);
+      missing_loc_sources.insert(fromosd);
     }
     else {
       ml->second.insert(fromosd);
+      missing_loc_sources.insert(fromosd);
     }
     found_missing = true;
   }
@@ -799,6 +801,8 @@ void PG::remove_down_peer_info(const OSDMapRef osdmap)
     if (!osdmap->is_up(p->first)) {
       dout(10) << " dropping down osd." << p->first << " info " << p->second << dendl;
       peer_missing.erase(p->first);
+      peer_log_requested.erase(p->first);
+      peer_missing_requested.erase(p->first);
       peer_info.erase(p++);
       removed = true;
     } else
@@ -894,6 +898,8 @@ void PG::clear_primary_state()
   finish_sync_event = 0;  // so that _finish_recvoery doesn't go off in another thread
 
   missing_loc.clear();
+  missing_loc_sources.clear();
+
   log.reset_recovery_pointers();
 
   scrub_reserved_peers.clear();
@@ -1395,16 +1401,14 @@ void PG::do_pending_flush()
   }
 }
 
-void PG::do_request(OpRequest *op)
+void PG::do_request(OpRequestRef op)
 {
   // do any pending flush
   do_pending_flush();
 
   switch (op->request->get_type()) {
   case CEPH_MSG_OSD_OP:
-    if (osd->op_is_discardable((MOSDOp*)op->request))
-      op->put();
-    else
+    if (!osd->op_is_discardable((MOSDOp*)op->request))
       do_op(op); // do it now
     break;
 
@@ -1434,11 +1438,11 @@ void PG::replay_queued_ops()
 {
   assert(is_replay() && is_active());
   eversion_t c = info.last_update;
-  list<OpRequest*> replay;
+  list<OpRequestRef> replay;
   dout(10) << "replay_queued_ops" << dendl;
   state_clear(PG_STATE_REPLAY);
 
-  for (map<eversion_t,OpRequest*>::iterator p = replay_queue.begin();
+  for (map<eversion_t,OpRequestRef>::iterator p = replay_queue.begin();
        p != replay_queue.end();
        p++) {
     if (p->first.version != c.version+1) {
@@ -2434,9 +2438,9 @@ void PG::adjust_local_snaps()
   }
 }
 
-void PG::requeue_object_waiters(map<hobject_t, list<OpRequest*> >& m)
+void PG::requeue_object_waiters(map<hobject_t, list<OpRequestRef> >& m)
 {
-  for (map<hobject_t, list<OpRequest*> >::iterator it = m.begin();
+  for (map<hobject_t, list<OpRequestRef> >::iterator it = m.begin();
        it != m.end();
        it++)
     osd->requeue_ops(this, it->second);
@@ -2514,7 +2518,7 @@ bool PG::sched_scrub()
 }
 
 
-void PG::sub_op_scrub_map(OpRequest *op)
+void PG::sub_op_scrub_map(OpRequestRef op)
 {
   MOSDSubOp *m = (MOSDSubOp *)op->request;
   assert(m->get_header().type == MSG_OSD_SUBOP);
@@ -2523,7 +2527,6 @@ void PG::sub_op_scrub_map(OpRequest *op)
   if (m->map_epoch < info.history.same_interval_since) {
     dout(10) << "sub_op_scrub discarding old sub_op from "
 	     << m->map_epoch << " < " << info.history.same_interval_since << dendl;
-    op->put();
     return;
   }
 
@@ -2547,8 +2550,6 @@ void PG::sub_op_scrub_map(OpRequest *op)
     assert(last_update_applied == info.last_update);
     osd->scrub_finalize_wq.queue(this);
   }
-
-  op->put();
 }
 
 /* 
@@ -2588,7 +2589,7 @@ void PG::_request_scrub_map(int replica, eversion_t version)
                                        get_osdmap()->get_cluster_inst(replica));
 }
 
-void PG::sub_op_scrub_reserve(OpRequest *op)
+void PG::sub_op_scrub_reserve(OpRequestRef op)
 {
   MOSDSubOp *m = (MOSDSubOp*)op->request;
   assert(m->get_header().type == MSG_OSD_SUBOP);
@@ -2596,7 +2597,6 @@ void PG::sub_op_scrub_reserve(OpRequest *op)
 
   if (scrub_reserved) {
     dout(10) << "Ignoring reserve request: Already reserved" << dendl;
-    op->put();
     return;
   }
 
@@ -2607,11 +2607,9 @@ void PG::sub_op_scrub_reserve(OpRequest *op)
   MOSDSubOpReply *reply = new MOSDSubOpReply(m, 0, get_osdmap()->get_epoch(), CEPH_OSD_FLAG_ACK);
   ::encode(scrub_reserved, reply->get_data());
   osd->cluster_messenger->send_message(reply, m->get_connection());
-
-  op->put();
 }
 
-void PG::sub_op_scrub_reserve_reply(OpRequest *op)
+void PG::sub_op_scrub_reserve_reply(OpRequestRef op)
 {
   MOSDSubOpReply *reply = (MOSDSubOpReply*)op->request;
   assert(reply->get_header().type == MSG_OSD_SUBOPREPLY);
@@ -2619,7 +2617,6 @@ void PG::sub_op_scrub_reserve_reply(OpRequest *op)
 
   if (!scrub_reserved) {
     dout(10) << "ignoring obsolete scrub reserve reply" << dendl;
-    op->put();
     return;
   }
 
@@ -2643,11 +2640,9 @@ void PG::sub_op_scrub_reserve_reply(OpRequest *op)
     }
     sched_scrub();
   }
-
-  op->put();
 }
 
-void PG::sub_op_scrub_unreserve(OpRequest *op)
+void PG::sub_op_scrub_unreserve(OpRequestRef op)
 {
   assert(op->request->get_header().type == MSG_OSD_SUBOP);
   dout(7) << "sub_op_scrub_unreserve" << dendl;
@@ -2655,11 +2650,9 @@ void PG::sub_op_scrub_unreserve(OpRequest *op)
   op->mark_started();
 
   clear_scrub_reserved();
-
-  op->put();
 }
 
-void PG::sub_op_scrub_stop(OpRequest *op)
+void PG::sub_op_scrub_stop(OpRequestRef op)
 {
   op->mark_started();
 
@@ -2672,8 +2665,6 @@ void PG::sub_op_scrub_stop(OpRequest *op)
 
   MOSDSubOpReply *reply = new MOSDSubOpReply(m, 0, get_osdmap()->get_epoch(), CEPH_OSD_FLAG_ACK);
   osd->cluster_messenger->send_message(reply, m->get_connection());
-
-  op->put();
 }
 
 void PG::clear_scrub_reserved()
@@ -2811,6 +2802,7 @@ void PG::repair_object(const hobject_t& soid, ScrubMap::object *po, int bad_peer
 
     missing.add(soid, oi.version, eversion_t());
     missing_loc[soid].insert(ok_peer);
+    missing_loc_sources.insert(ok_peer);
 
     log.last_requested = 0;
   }
@@ -3555,6 +3547,7 @@ void PG::start_peering_interval(const OSDMapRef lastmap,
   // deactivate.
   state_clear(PG_STATE_ACTIVE);
   state_clear(PG_STATE_DOWN);
+  state_clear(PG_STATE_RECOVERING);
 
   peer_missing.clear();
 
@@ -3579,8 +3572,8 @@ void PG::start_peering_interval(const OSDMapRef lastmap,
       clear_stats();
 	
       // take replay queue waiters
-      list<OpRequest*> ls;
-      for (map<eversion_t,OpRequest*>::iterator it = replay_queue.begin();
+      list<OpRequestRef> ls;
+      for (map<eversion_t,OpRequestRef>::iterator it = replay_queue.begin();
 	   it != replay_queue.end();
 	   it++)
 	ls.push_back(it->second);
@@ -4044,8 +4037,12 @@ boost::statechart::result PG::RecoveryState::Active::react(const ActMap&)
   assert(pg->is_active());
   assert(pg->is_primary());
 
-  pg->check_recovery_op_pulls(pg->get_osdmap());
-	
+  if (pg->check_recovery_sources(pg->get_osdmap()) &&
+      pg->have_unfound()) {
+    // object may have become unfound
+    pg->discover_all_missing(*context< RecoveryMachine >().get_query_map());
+  }
+
   if (g_conf->osd_check_for_log_corruption)
     pg->check_log_for_corruption(pg->osd->store);
 

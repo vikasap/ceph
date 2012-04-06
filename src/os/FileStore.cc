@@ -76,7 +76,7 @@ using ceph::crypto::SHA1;
 
 #include "common/config.h"
 
-#define DOUT_SUBSYS filestore
+#define dout_subsys ceph_subsys_filestore
 #undef dout_prefix
 #define dout_prefix *_dout << "filestore(" << basedir << ") "
 
@@ -113,6 +113,13 @@ using ceph::crypto::SHA1;
 #define ALIGN_DOWN(x, by) ((x) - ((x) % (by)))
 #define ALIGNED(x, by) (!((x) % (by)))
 #define ALIGN_UP(x, by) (ALIGNED((x), (by)) ? (x) : (ALIGN_DOWN((x), (by)) + (by)))
+
+
+ostream& operator<<(ostream& out, const FileStore::OpSequencer& s)
+{
+  assert(&out);
+  return out << *s.parent;
+}
 
 int do_getxattr(const char *fn, const char *name, void *val, size_t size);
 int do_fgetxattr(int fd, const char *name, void *val, size_t size);
@@ -660,6 +667,7 @@ FileStore::FileStore(const std::string &base, const std::string &jdev) :
   sync_entry_timeo_lock("sync_entry_timeo_lock"),
   timer(g_ceph_context, sync_entry_timeo_lock),
   stop(false), sync_thread(this),
+  default_osr("default"),
   op_queue_len(0), op_queue_bytes(0), op_finisher(g_ceph_context), next_finish(0),
   op_tp(g_ceph_context, "FileStore::op_tp", g_conf->filestore_op_threads),
   op_wq(this, g_conf->filestore_op_thread_timeout,
@@ -2017,7 +2025,9 @@ int FileStore::get_max_object_name_length()
 /// -----------------------------
 
 FileStore::Op *FileStore::build_op(list<Transaction*>& tls,
-				   Context *onreadable, Context *onreadable_sync)
+				   Context *onreadable,
+				   Context *onreadable_sync,
+				   TrackedOpRef osd_op)
 {
   uint64_t bytes = 0, ops = 0;
   for (list<Transaction*>::iterator p = tls.begin();
@@ -2034,6 +2044,7 @@ FileStore::Op *FileStore::build_op(list<Transaction*>& tls,
   o->onreadable_sync = onreadable_sync;
   o->ops = ops;
   o->bytes = bytes;
+  o->osd_op = osd_op;
   return o;
 }
 
@@ -2061,9 +2072,11 @@ void FileStore::queue_op(OpSequencer *osr, Op *o)
 
   op_tp.unlock();
 
-  dout(5) << "queue_op " << o << " seq " << o->op << " " << o->bytes << " bytes"
-	   << "   (queue has " << op_queue_len << " ops and " << op_queue_bytes << " bytes)"
-	   << dendl;
+  dout(5) << "queue_op " << o << " seq " << o->op
+	  << " " << *osr
+	  << " " << o->bytes << " bytes"
+	  << "   (queue has " << op_queue_len << " ops and " << op_queue_bytes << " bytes)"
+	  << dendl;
   op_wq.queue(osr);
 }
 
@@ -2114,10 +2127,10 @@ void FileStore::_do_op(OpSequencer *osr)
   osr->apply_lock.Lock();
   Op *o = osr->peek_queue();
 
-  dout(5) << "_do_op " << o << " " << o->op << " osr " << osr << "/" << osr->parent << " start" << dendl;
+  dout(5) << "_do_op " << o << " seq " << o->op << " " << *osr << "/" << osr->parent << " start" << dendl;
   int r = do_transactions(o->tls, o->op);
   op_apply_finish(o->op);
-  dout(10) << "_do_op " << o << " " << o->op << " r = " << r
+  dout(10) << "_do_op " << o << " seq " << o->op << " r = " << r
 	   << ", finisher " << o->onreadable << " " << o->onreadable_sync << dendl;
   
   /*dout(10) << "op_entry finished " << o->bytes << " bytes, queue now "
@@ -2129,7 +2142,7 @@ void FileStore::_finish_op(OpSequencer *osr)
 {
   Op *o = osr->dequeue();
   
-  dout(10) << "_finish_op on osr " << osr << "/" << osr->parent << dendl;
+  dout(10) << "_finish_op " << o << " seq " << o->op << " " << *osr << "/" << osr->parent << dendl;
   osr->apply_lock.Unlock();  // locked in _do_op
 
   // called with tp lock held
@@ -2170,7 +2183,8 @@ int FileStore::queue_transaction(Sequencer *osr, Transaction *t)
 
 int FileStore::queue_transactions(Sequencer *posr, list<Transaction*> &tls,
 				  Context *onreadable, Context *ondisk,
-				  Context *onreadable_sync)
+				  Context *onreadable_sync,
+				  TrackedOpRef osd_op)
 {
   if (g_conf->filestore_blackhole) {
     dout(0) << "queue_transactions filestore_blackhole = TRUE, dropping transaction" << dendl;
@@ -2183,23 +2197,23 @@ int FileStore::queue_transactions(Sequencer *posr, list<Transaction*> &tls,
     posr = &default_osr;
   if (posr->p) {
     osr = (OpSequencer *)posr->p;
-    dout(5) << "queue_transactions existing osr " << osr << "/" << osr->parent << dendl; //<< " w/ q " << osr->q << dendl;
+    dout(5) << "queue_transactions existing " << *osr << "/" << osr->parent << dendl; //<< " w/ q " << osr->q << dendl;
   } else {
     osr = new OpSequencer;
     osr->parent = posr;
     posr->p = osr;
-    dout(5) << "queue_transactions new osr " << osr << "/" << osr->parent << dendl;
+    dout(5) << "queue_transactions new " << *osr << "/" << osr->parent << dendl;
   }
 
   if (journal && journal->is_writeable() && !m_filestore_journal_trailing) {
-    Op *o = build_op(tls, onreadable, onreadable_sync);
+    Op *o = build_op(tls, onreadable, onreadable_sync, osd_op);
     op_queue_reserve_throttle(o);
     journal->throttle();
     o->op = op_submit_start();
     if (m_filestore_journal_parallel) {
       dout(5) << "queue_transactions (parallel) " << o->op << " " << o->tls << dendl;
       
-      _op_journal_transactions(o->tls, o->op, ondisk);
+      _op_journal_transactions(o->tls, o->op, ondisk, osd_op);
       
       // queue inside journal lock, to preserve ordering
       queue_op(osr, o);
@@ -2208,7 +2222,9 @@ int FileStore::queue_transactions(Sequencer *posr, list<Transaction*> &tls,
       
       osr->queue_journal(o->op);
 
-      _op_journal_transactions(o->tls, o->op, new C_JournaledAhead(this, osr, o, ondisk));
+      _op_journal_transactions(o->tls, o->op,
+			       new C_JournaledAhead(this, osr, o, ondisk),
+			       osd_op);
     } else {
       assert(0);
     }
@@ -2223,7 +2239,7 @@ int FileStore::queue_transactions(Sequencer *posr, list<Transaction*> &tls,
   int r = do_transactions(tls, op);
     
   if (r >= 0) {
-    _op_journal_transactions(tls, op, ondisk);
+    _op_journal_transactions(tls, op, ondisk, osd_op);
   } else {
     delete ondisk;
   }
@@ -2244,7 +2260,7 @@ int FileStore::queue_transactions(Sequencer *posr, list<Transaction*> &tls,
 
 void FileStore::_journaled_ahead(OpSequencer *osr, Op *o, Context *ondisk)
 {
-  dout(5) << "_journaled_ahead " << o->op << " " << o->tls << dendl;
+  dout(5) << "_journaled_ahead " << o << " seq " << o->op << " " << *osr << " " << o->tls << dendl;
 
   // this should queue in order because the journal does it's completions in order.
   journal_lock.Lock();
@@ -2652,7 +2668,7 @@ unsigned FileStore::_do_transaction(Transaction& t, uint64_t op_seq, int trans_n
 	coll_t ocid = i.get_cid();
 	coll_t ncid = i.get_cid();
 	hobject_t oid = i.get_oid();
-	r = _collection_move(ocid, ncid, oid);
+	r = _collection_move(ocid, ncid, oid, spos);
       }
       break;
 
@@ -2746,6 +2762,10 @@ unsigned FileStore::_do_transaction(Transaction& t, uint64_t op_seq, int trans_n
 	  ok = true;
 	}
 	if (r == -EEXIST && op == Transaction::OP_COLL_ADD) {
+	  dout(10) << "tolerating EEXIST during journal replay since btrfs_snap is not enabled" << dendl;
+	  ok = true;
+	}
+	if (r == -EEXIST && op == Transaction::OP_COLL_MOVE) {
 	  dout(10) << "tolerating EEXIST during journal replay since btrfs_snap is not enabled" << dendl;
 	  ok = true;
 	}
@@ -3047,6 +3067,7 @@ int FileStore::_zero(coll_t cid, const hobject_t& oid, uint64_t offset, size_t l
   dout(20) << "zero FALLOC_FL_PUNCH_HOLE not supported, falling back to writing zeros" << dendl;
   {
     bufferptr bp(len);
+    bp.zero();
     bufferlist bl;
     bl.push_back(bp);
     ret = _write(cid, oid, offset, len, bl);
@@ -4427,12 +4448,24 @@ int FileStore::_collection_remove(coll_t c, const hobject_t& o)
   return r;
 }
 
-int FileStore::_collection_move(coll_t c, coll_t oldcid, const hobject_t& o) 
+int FileStore::_collection_move(coll_t c, coll_t oldcid, const hobject_t& o,
+				const SequencerPosition& spos) 
 {
   dout(15) << "collection_move " << c << "/" << o << " from " << oldcid << "/" << o << dendl;
+
+  if (!_check_replay_guard(oldcid, o, spos))
+    return 0;
+
   int r = lfn_link(oldcid, c, o);
-  if (r == 0)
+  if (r == 0 || (replaying && r == -EEXIST)) {
     r = lfn_unlink(oldcid, o);
+
+    // set guard on object so we don't do this again
+    int fd = lfn_open(c, o, 0);
+    assert(fd >= 0);
+    _set_replay_guard(fd, spos);
+    TEMP_FAILURE_RETRY(::close(fd));
+  }
   dout(10) << "collection_move " << c << "/" << o << " from " << oldcid << "/" << o << " = " << r << dendl;
   return r;
 }

@@ -24,6 +24,7 @@
 #include "common/errno.h"
 #include "common/WorkQueue.h"
 #include "common/Timer.h"
+#include "common/Throttle.h"
 #include "rgw_common.h"
 #include "rgw_rados.h"
 #include "rgw_acl.h"
@@ -43,7 +44,7 @@
 #include "include/types.h"
 #include "common/BackTrace.h"
 
-#define DOUT_SUBSYS rgw
+#define dout_subsys ceph_subsys_rgw
 
 using namespace std;
 
@@ -122,6 +123,7 @@ struct RGWRequest
 class RGWProcess {
   deque<RGWRequest *> m_req_queue;
   ThreadPool m_tp;
+  Throttle req_throttle;
 
   struct RGWWQ : public ThreadPool::WorkQueue<RGWRequest> {
     RGWProcess *process;
@@ -154,6 +156,7 @@ class RGWProcess {
     void _process(RGWRequest *req) {
       perfcounter->inc(l_rgw_qactive);
       process->handle_request(req);
+      process->req_throttle.put(1);
       perfcounter->inc(l_rgw_qactive, -1);
     }
     void _dump_queue() {
@@ -177,6 +180,7 @@ class RGWProcess {
 public:
   RGWProcess(CephContext *cct, int num_threads)
     : m_tp(cct, "RGWProcess::m_tp", num_threads),
+      req_throttle(num_threads * 2),
       req_wq(this, g_conf->rgw_op_thread_timeout,
 	     g_conf->rgw_op_thread_suicide_timeout, &m_tp),
       max_req_id(0) {}
@@ -207,6 +211,7 @@ void RGWProcess::run()
     req->id = ++max_req_id;
     dout(10) << "allocated request req=" << hex << req << dec << dendl;
     FCGX_InitRequest(&req->fcgx, s, 0);
+    req_throttle.get(1);
     int ret = FCGX_Accept_r(&req->fcgx);
     if (ret < 0)
       break;
@@ -353,6 +358,9 @@ int main(int argc, const char **argv)
       cerr << "radosgw: must specify 'rgw socket path' to run as a daemon" << std::endl;
       exit(1);
     }
+
+    g_ceph_context->_log->stop();
+
     childpid = fork();
     if (childpid) {
       // i am the parent
@@ -368,6 +376,8 @@ int main(int argc, const char **argv)
     if (r < 0) {
       dout(0) << "weird, i couldn't chdir to '" << g_conf->chdir << "'" << dendl;
     }
+
+    g_ceph_context->_log->start();
   }
   Mutex mutex("main");
   SafeTimer init_timer(g_ceph_context, mutex);
