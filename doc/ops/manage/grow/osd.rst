@@ -9,8 +9,7 @@ Briefly...
 
 #. Allocate a new OSD id::
 
-   $ ceph osd create
-   123
+   $ ceph osd create 123
 
 #. Make sure ceph.conf is valid for the new OSD.
 
@@ -22,7 +21,7 @@ Briefly...
 
    $ ceph auth add osd.123 osd 'allow *' mon 'allow rwx' -i /var/lib/ceph/osd-data/123/keyring
 
-#. Adjust the CRUSH map to allocate data to the new device (see :ref:`adjusting-crush`).
+#. Adjust the CRUSH map to allocate data to the new device.
 
 
 Removing OSDs
