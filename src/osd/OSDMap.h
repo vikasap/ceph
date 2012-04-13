@@ -467,19 +467,28 @@ private:
     // map to osds[]
     ps_t pps = pool.raw_pg_to_pps(pg);  // placement ps
     unsigned size = pool.get_size();
+    vector<int> raw_osds;
     {
       int preferred = pg.preferred();
       if (preferred >= max_osd || preferred >= crush.get_max_devices())
 	preferred = -1;
 
-      assert(get_max_osd() >= crush.get_max_devices());
-
       // what crush rule?
       int ruleno = crush.find_rule(pool.get_crush_ruleset(), pool.get_type(), size);
       if (ruleno >= 0)
-	crush.do_rule(ruleno, pps, osds, size, preferred, osd_weight);
+	crush.do_rule(ruleno, pps, raw_osds, size, preferred, osd_weight);
     }
-  
+
+    // ignore osds in the crushmap that aren't in the osdmap yet
+    if (max_osd < crush.get_max_devices()) {
+      for (size_t i = 0; i < raw_osds.size(); ++i) {
+	if (raw_osds[i] < max_osd)
+	  osds.push_back(raw_osds[i]);
+      }
+    } else {
+      osds.swap(raw_osds);
+    }
+
     return osds.size();
   }
 
