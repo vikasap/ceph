@@ -177,6 +177,11 @@ int main(int argc, const char **argv)
   } else {
     cout << "ceph_open: success" << std::endl;
   }
+  ret = ceph_removexattr(cmount, "barfile", "user.testxattr");
+  if (ret < 0 && ret != -ENODATA) {
+    cerr << "ceph_removexattr error: " << cpp_strerror(ret) << std::endl;
+    return 1;
+  }
   ret = ceph_setxattr(cmount, "barfile", "user.testxattr", (void *) "AYBABTU", 7, XATTR_CREATE);
   if (ret < 0) {
     cerr << "ceph_setxattr error: " << cpp_strerror(ret) << std::endl;
