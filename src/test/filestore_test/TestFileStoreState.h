@@ -92,7 +92,7 @@ public:
     m_max_in_flight(0), m_in_flight(0), m_finished_lock("Finished Lock") {
     m_store.reset(store);
   }
-  ~TestFileStoreState() { }
+  ~TestFileStoreState();
 
   void init(int colls, int objs);
   void init() {

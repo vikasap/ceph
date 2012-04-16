@@ -32,6 +32,15 @@
 const coll_t TestFileStoreState::META_COLL("meta");
 const coll_t TestFileStoreState::TEMP_COLL("temp");
 
+TestFileStoreState::~TestFileStoreState()
+{
+  map<int, coll_entry_t*>::iterator it = m_collections.begin();
+  for (; it != m_collections.end(); it++) {
+    delete it->second;
+    m_collections.erase(it);
+  }
+}
+
 void TestFileStoreState::init(int colls, int objs)
 {
   dout(5) << "init " << colls << " colls " << objs << " objs" << dendl;
@@ -103,18 +112,11 @@ TestFileStoreState::coll_entry_t *TestFileStoreState::get_coll_at(int pos)
 
 TestFileStoreState::coll_entry_t::~coll_entry_t()
 {
-  /*
-  if (m_objects.size() > 0) {
-    for (set<hobject_t*>::iterator it = m_objects.begin();
-        it != m_objects.end(); it++) {
-      hobject_t *obj = *it;
-      m_objects.erase(it);
-      if (obj) {
-        delete obj;
-      }
-    }
+  map<int, hobject_t*>::iterator it = m_objects.begin();
+  for (; it != m_objects.end(); it++) {
+    delete it->second;
+    m_objects.erase(it);
   }
-  */
 }
 
 hobject_t *TestFileStoreState::coll_entry_t::touch_obj(int id)
