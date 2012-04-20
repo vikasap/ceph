@@ -1216,6 +1216,7 @@ noinst_HEADERS = \
 	common/environment.h\
 	common/likely.h\
 	common/lockdep.h\
+	common/obj_bencher.h\
 	common/snap_types.h\
         common/Clock.h\
         common/Cond.h\
@@ -1550,7 +1551,6 @@ noinst_HEADERS = \
         osd/ReplicatedPG.h\
         osd/Watch.h\
         osd/osd_types.h\
-	osdc/rados_bencher.h\
         osdc/Blinker.h\
         osdc/Filer.h\
         osdc/Journaler.h\
