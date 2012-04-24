@@ -200,7 +200,7 @@ struct librados::IoCtxImpl {
 };
 
 namespace librados {
-struct WatchContext {
+struct WatchContext : public RefCountedWaitObject {
   IoCtxImpl *io_ctx_impl;
   const object_t oid;
   uint64_t cookie;
