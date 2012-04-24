@@ -212,7 +212,7 @@ struct WatchContext : public RefCountedWaitObject {
 	       const object_t& _oc,
 	       librados::WatchCtx *_ctx);
   ~WatchContext();
-  void notify(uint8_t opcode, uint64_t ver, uint64_t notify_id,
+  void notify(Mutex *lock, uint8_t opcode, uint64_t ver, uint64_t notify_id,
 	      bufferlist& payload);
 };
 }

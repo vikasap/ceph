@@ -461,25 +461,18 @@ void librados::RadosClient::unregister_watcher(uint64_t cookie)
 class C_WatchNotify : public Context {
   librados::WatchContext *ctx;
   Mutex *client_lock;
-  Mutex *cond_lock;
-  Cond *cond;
   uint8_t opcode;
   uint64_t ver;
   uint64_t notify_id;
   bufferlist bl;
 
 public:
-  C_WatchNotify(librados::WatchContext *_ctx, Mutex *_client_lock, Mutex *_cond_lock, Cond *_cond,
+  C_WatchNotify(librados::WatchContext *_ctx, Mutex *_client_lock,
                 uint8_t _o, uint64_t _v, uint64_t _n, bufferlist& _bl) : 
-                ctx(_ctx), client_lock(_client_lock), cond_lock(_cond_lock), cond(_cond), opcode(_o), ver(_v), notify_id(_n), bl(_bl) {}
+                ctx(_ctx), client_lock(_client_lock), opcode(_o), ver(_v), notify_id(_n), bl(_bl) {}
 
   void finish(int r) {
-    client_lock->Lock();
-    ctx->notify(opcode, ver, notify_id, bl);
-    client_lock->Unlock();
-    cond_lock->Lock();
-    cond->SignalAll();
-    cond_lock->Unlock();
+    ctx->notify(client_lock, opcode, ver, notify_id, bl);
     ctx->put();
   }
 };
@@ -496,16 +489,10 @@ void librados::RadosClient::watch_notify(MWatchNotify *m)
     return;
 
   wc->get();
-  Mutex cond_lock("watch_notify::cond_lock");
-  Cond cond;
   lock.Unlock();
 
-  finisher.queue(new C_WatchNotify(wc, &lock, &cond_lock, &cond, m->opcode, m->ver, m->notify_id, m->bl));
+  finisher.queue(new C_WatchNotify(wc, &lock, m->opcode, m->ver, m->notify_id, m->bl));
   m->put();
-
-  cond_lock.Lock();
-  cond.Wait(cond_lock);
-  cond_lock.Unlock();
 
   lock.Lock();
 }
